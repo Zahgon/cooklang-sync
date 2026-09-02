@@ -10,3 +10,14 @@ out
 *.xcframework.zip
 *.xcframework.zip.sha256
 .build
+
+# Local benchmark/smoke scratch files
+baseline_rocket.txt
+limits.sh
+limits_axum.txt
+limits_rocket.txt
+migrated_axum.txt
+p2p.sh
+p2p_axum.txt
+p2p_rocket.txt
+smoke.sh

@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use diesel::dsl::sql;
 use diesel::prelude::*;
-use rocket_sync_db_pools::database;
+use diesel::r2d2::{ConnectionManager, Pool};
 
 use super::models::*;
 use super::schema::*;
@@ -11,8 +13,45 @@ type DbConnection = diesel::SqliteConnection;
 #[cfg(feature = "database_postgres")]
 type DbConnection = diesel::PgConnection;
 
-#[database("metadata")]
-pub(crate) struct Db(DbConnection);
+/// Connection pool for the metadata database, replacing
+/// `rocket_sync_db_pools`' `#[database("metadata")]` attribute. `run` keeps
+/// the same shape the fairing-provided handle had, so handlers still hand a
+/// blocking closure to the pool and await the result -- diesel is a blocking
+/// library, so the closure runs on the blocking pool rather than the async
+/// runtime's worker threads.
+#[derive(Clone)]
+pub(crate) struct Db(Pool<ConnectionManager<DbConnection>>);
+
+impl Db {
+    pub(crate) fn new(database_url: &str) -> Self {
+        let manager = ConnectionManager::<DbConnection>::new(database_url);
+        let pool = Pool::builder()
+            .connection_timeout(Duration::from_secs(POOL_TIMEOUT_SECONDS))
+            .build(manager)
+            .expect("database connection");
+
+        Db(pool)
+    }
+
+    pub(crate) async fn run<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut DbConnection) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.0.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get().expect("database connection");
+
+            f(&mut conn)
+        })
+        .await
+        .expect("database task")
+    }
+}
+
+/// Carried over from `rocket.toml`'s `timeout = 10` for the metadata pool.
+const POOL_TIMEOUT_SECONDS: u64 = 10;
 
 #[cfg(feature = "database_postgres")]
 #[allow(dead_code)]

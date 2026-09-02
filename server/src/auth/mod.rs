@@ -1,4 +1,5 @@
 mod entitlement;
+mod rejection;
 mod request;
 mod token;
 pub mod user;

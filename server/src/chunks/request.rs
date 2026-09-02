@@ -1,14 +1,23 @@
-use rocket::request::{FromRequest, Outcome};
+use std::convert::Infallible;
 
-pub struct RawContentType<'r>(pub &'r str);
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for RawContentType<'r> {
-    type Error = ();
+pub struct RawContentType(pub String);
 
-    async fn from_request(req: &'r rocket::Request<'_>) -> Outcome<Self, Self::Error> {
-        let header = req.headers().get_one("Content-Type").unwrap_or("");
+impl<S> FromRequestParts<S> for RawContentType
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
 
-        Outcome::Success(RawContentType(header))
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+
+        Ok(RawContentType(header.to_string()))
     }
 }

@@ -1,18 +1,16 @@
-use std::convert::From;
-
-use rocket::form::{Form, FromForm};
+use serde::Deserialize;
 
 use super::models::NewFileRecord;
 use crate::chunk_id::ChunkId;
 
-#[derive(Debug, FromForm)]
-pub(crate) struct CommitPayload<'r> {
-    path: &'r str,
+#[derive(Debug, Deserialize)]
+pub(crate) struct CommitPayload {
+    path: String,
     deleted: bool,
-    chunk_ids: &'r str,
+    chunk_ids: String,
 }
 
-impl<'a> CommitPayload<'a> {
+impl CommitPayload {
     pub(crate) fn non_local_chunks(&self) -> Vec<ChunkId<'_>> {
         let desired: Vec<&str> = self.chunk_ids.split(',').collect();
 
@@ -25,11 +23,11 @@ impl<'a> CommitPayload<'a> {
 }
 
 impl NewFileRecord {
-    pub(crate) fn from_payload_and_user_id(payload: Form<CommitPayload<'_>>, user_id: i32) -> Self {
+    pub(crate) fn from_payload_and_user_id(payload: CommitPayload, user_id: i32) -> Self {
         NewFileRecord {
-            path: payload.path.into(),
+            path: payload.path,
             deleted: payload.deleted,
-            chunk_ids: payload.chunk_ids.into(),
+            chunk_ids: payload.chunk_ids,
             user_id,
         }
     }

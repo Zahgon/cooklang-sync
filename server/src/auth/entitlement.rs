@@ -1,8 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocket::http::Status;
-use rocket::request::{self, FromRequest, Outcome, Request};
+use axum::extract::{FromRequestParts, MatchedPath};
+use axum::http::request::Parts;
+use tracing::warn;
 
+use super::rejection::AuthRejection;
 use super::request::extract_claims;
 use super::user::User;
 
@@ -12,7 +14,7 @@ use super::user::User;
 /// lookup, no caching needed at this call volume).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EnforcementMode {
-    /// Behave exactly like a plain `User` guard: never block, never log.
+    /// Behave exactly like a plain `User` extractor: never block, never log.
     Off,
     /// Never block, but log what *would* have been blocked under `Enforce`.
     Log,
@@ -41,7 +43,7 @@ impl EnforcementMode {
 /// The resolved `SYNC_ENFORCEMENT` mode, as a stable string, for a one-line
 /// startup log so it's visible at a glance which mode a deployment is
 /// actually running in (rather than only inferable from behavior at
-/// request time). Called once from `chunks::stage()`'s ignite.
+/// request time). Called once from `chunks::router()`.
 pub(crate) fn current_mode_name() -> &'static str {
     enforcement_mode().as_str()
 }
@@ -65,9 +67,9 @@ impl EntitlementReason {
     }
 }
 
-/// What an `EntitledUser` guard should do for a given (mode, claim, now)
+/// What an `EntitledUser` extractor should do for a given (mode, claim, now)
 /// combination. Factored out as a pure function of plain data so it's
-/// testable without touching Rocket or the clock.
+/// testable without touching the web framework or the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EntitlementDecision {
     /// Let the request through, no log line.
@@ -78,9 +80,9 @@ pub(super) enum EntitlementDecision {
     Reject(EntitlementReason),
 }
 
-/// Pure decision logic, independent of Rocket. `now` is a unix timestamp
-/// (seconds), passed in rather than read from the clock so tests can control
-/// it.
+/// Pure decision logic, independent of the web framework. `now` is a unix
+/// timestamp (seconds), passed in rather than read from the clock so tests can
+/// control it.
 pub(super) fn decide(
     mode: EnforcementMode,
     sync_until: Option<i64>,
@@ -116,10 +118,10 @@ fn now_unix() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn route_name(request: &Request<'_>) -> String {
-    match request.route() {
-        Some(route) => format!("{} {}", request.method(), route.uri),
-        None => format!("{} {}", request.method(), request.uri()),
+fn route_name(parts: &Parts) -> String {
+    match parts.extensions.get::<MatchedPath>() {
+        Some(path) => format!("{} {}", parts.method, path.as_str()),
+        None => format!("{} {}", parts.method, parts.uri),
     }
 }
 
@@ -132,7 +134,7 @@ fn route_name(request: &Request<'_>) -> String {
 /// Wraps `User` (rather than duplicating its fields) so `EntitledUser` stays
 /// a thin decoration over the same identity, and `Deref`s to it so existing
 /// handler bodies that read `user.id` keep working unchanged after swapping
-/// the guard type in the signature.
+/// the extractor type in the signature.
 pub struct EntitledUser(pub User);
 
 impl std::ops::Deref for EntitledUser {
@@ -143,37 +145,39 @@ impl std::ops::Deref for EntitledUser {
     }
 }
 
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for EntitledUser {
-    type Error = ();
+impl<S> FromRequestParts<S> for EntitledUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthRejection;
 
-    async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
-        let claim = match extract_claims(request) {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let claim = match extract_claims(parts) {
             Ok(c) => c,
-            Err(_) => return Outcome::Error((Status::Unauthorized, ())),
+            Err(_) => return Err(AuthRejection::Unauthorized),
         };
 
         let decision = decide(enforcement_mode(), claim.sync_until, now_unix());
 
         match decision {
-            EntitlementDecision::Allow => Outcome::Success(EntitledUser(User { id: claim.uid })),
+            EntitlementDecision::Allow => Ok(EntitledUser(User { id: claim.uid })),
             EntitlementDecision::AllowWithWarning(reason) => {
                 warn!(
                     "sync_entitlement_would_block uid={} route={} reason={}",
                     claim.uid,
-                    route_name(request),
+                    route_name(parts),
                     reason.as_str()
                 );
-                Outcome::Success(EntitledUser(User { id: claim.uid }))
+                Ok(EntitledUser(User { id: claim.uid }))
             }
             EntitlementDecision::Reject(reason) => {
                 warn!(
                     "sync_entitlement_blocked uid={} route={} reason={}",
                     claim.uid,
-                    route_name(request),
+                    route_name(parts),
                     reason.as_str()
                 );
-                Outcome::Error((Status::PaymentRequired, ()))
+                Err(AuthRejection::PaymentRequired)
             }
         }
     }

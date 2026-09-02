@@ -1,6 +1,6 @@
 use jsonwebtoken::{decode, errors::ErrorKind, Algorithm, DecodingKey, Validation};
 
-use rocket::serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -17,7 +17,7 @@ pub struct Claims {
     /// as `None` rather than failing the whole token: a malformed claim
     /// must degrade to "no entitlement claim" (allowed in `off`/`log`, 402
     /// in `enforce`), never to a 401 that takes the request down before the
-    /// entitlement guard even runs.
+    /// entitlement check even runs.
     #[serde(default, deserialize_with = "lenient_ts")]
     pub sync_until: Option<i64>,
 }
@@ -30,9 +30,9 @@ fn lenient_ts<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = Option::<rocket::serde::json::Value>::deserialize(deserializer)?;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|v| match v {
-        rocket::serde::json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::Number(n) => n.as_i64(),
         _ => None,
     }))
 }
@@ -68,10 +68,8 @@ mod tests {
     }
 
     /// Signs a JSON payload directly (bypassing `Claims`) so we can simulate
-    /// a token minted before `sync_until` existed at all. Reuses rocket's
-    /// re-exported `serde_json` (server already depends on rocket's "json"
-    /// feature) instead of pulling in a fresh dev-dependency just for tests.
-    fn sign_raw(json: &rocket::serde::json::Value) -> String {
+    /// a token minted before `sync_until` existed at all.
+    fn sign_raw(json: &serde_json::Value) -> String {
         encode(
             &Header::new(Algorithm::HS256),
             json,
@@ -121,7 +119,7 @@ mod tests {
         // Simulates a JWT minted before the `sync_until` claim was
         // introduced: the field is entirely absent from the payload, not
         // just `null`. `#[serde(default)]` must tolerate that.
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 13,
             "exp": far_future_exp(),
         });
@@ -136,7 +134,7 @@ mod tests {
     fn decodes_token_tolerating_unknown_extra_claims() {
         // Any other unrecognized claim (present or future) must not break
         // decoding for either User or EntitledUser.
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 21,
             "exp": far_future_exp(),
             "sync_until": 1_900_000_000,
@@ -151,7 +149,7 @@ mod tests {
 
     #[test]
     fn decodes_string_sync_until_as_none_instead_of_failing() {
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 30,
             "exp": far_future_exp(),
             "sync_until": "not-a-timestamp",
@@ -166,7 +164,7 @@ mod tests {
 
     #[test]
     fn decodes_float_sync_until_as_none_instead_of_failing() {
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 31,
             "exp": far_future_exp(),
             "sync_until": 1_900_000_000.5,
@@ -181,7 +179,7 @@ mod tests {
 
     #[test]
     fn decodes_bool_sync_until_as_none_instead_of_failing() {
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 32,
             "exp": far_future_exp(),
             "sync_until": true,
@@ -196,7 +194,7 @@ mod tests {
 
     #[test]
     fn decodes_null_sync_until_as_none_instead_of_failing() {
-        let payload = rocket::serde::json::json!({
+        let payload = serde_json::json!({
             "uid": 33,
             "exp": far_future_exp(),
             "sync_until": null,

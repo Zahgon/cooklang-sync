@@ -1,14 +1,18 @@
-use rocket::fairing::AdHoc;
-use rocket::form::Form;
-use rocket::response::Debug;
-use rocket::serde::json::Json;
-use rocket::{Shutdown, State};
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Form, Json, Router};
+use tower_http::catch_panic::CatchPanicLayer;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::auth::user::User;
 use crate::auth::EntitledUser;
+use crate::error::AppError;
+use crate::extract::Query;
 
 mod db;
 mod middleware;
@@ -23,18 +27,46 @@ use models::{FileRecord, NewFileRecord};
 
 use notification::ActiveClients;
 
-type Result<T, E = Debug<diesel::result::Error>> = std::result::Result<T, E>;
+type Result<T, E = AppError> = std::result::Result<T, E>;
+
+/// Default from `rocket.toml`'s `[default.databases.metadata] url`, now read
+/// from the environment since there is no framework-managed config file.
+const DEFAULT_DATABASE_URL: &str = "db/server.sqlite3";
+
+/// Carried over from `rocket.toml`'s `form = "1Mib"` limit.
+const FORM_LIMIT: usize = 1024 * 1024;
+
+#[derive(Clone)]
+struct MetadataState {
+    db: Db,
+    clients: Arc<Mutex<ActiveClients>>,
+    shutdown: CancellationToken,
+}
+
+#[derive(Deserialize)]
+struct CommitQuery {
+    uuid: String,
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    jid: i32,
+}
+
+#[derive(Deserialize)]
+struct PollQuery {
+    seconds: u64,
+    uuid: String,
+}
 
 // check if all hashes are present
 // if any not present return back need more and list of hashes
 // if present all insert into db path and chunk hashes and return back a new jid
-#[post("/commit?<uuid>", data = "<commit_payload>")]
 async fn commit(
     user: EntitledUser,
-    clients: &State<Mutex<ActiveClients>>,
-    db: Db,
-    uuid: String,
-    commit_payload: Form<request::CommitPayload<'_>>,
+    State(state): State<MetadataState>,
+    Query(query): Query<CommitQuery>,
+    Form(commit_payload): Form<request::CommitPayload>,
 ) -> Result<Json<response::CommitResultStatus>> {
     let to_be_uploaded = commit_payload.non_local_chunks();
 
@@ -50,13 +82,15 @@ async fn commit(
             let existing = {
                 let user_id = r.user_id;
                 let path = r.path.clone();
-                db.run(move |conn| latest_for_path(conn, user_id, &path))
+                state
+                    .db
+                    .run(move |conn| latest_for_path(conn, user_id, &path))
                     .await?
             };
 
             if let Some(existing) = existing {
                 if existing.chunk_ids == r.chunk_ids && existing.deleted == r.deleted {
-                    rocket::info!(
+                    tracing::info!(
                         "dedup: no-op commit user_id={} path={:?} existing_id={}",
                         r.user_id,
                         r.path,
@@ -66,9 +100,9 @@ async fn commit(
                 }
             }
 
-            let id: i32 = db.run(move |conn| insert_new_record(conn, r)).await?;
+            let id: i32 = state.db.run(move |conn| insert_new_record(conn, r)).await?;
 
-            clients.lock().unwrap().notify(&uuid);
+            state.clients.lock().unwrap().notify(&query.uuid);
 
             Ok(Json(response::CommitResultStatus::Success(id)))
         }
@@ -85,56 +119,74 @@ async fn commit(
     }
 }
 
-#[get("/has_files")]
-async fn has_files(db: Db, user: User) -> Result<Json<bool>> {
-    let result = db.run(move |conn| db_has_files(conn, user.id)).await?;
+async fn has_files(user: User, State(state): State<MetadataState>) -> Result<Json<bool>> {
+    let result = state.db.run(move |conn| db_has_files(conn, user.id)).await?;
 
     Ok(Json(result))
 }
 
 // return back array of jid, path, hashes for all jid since requested
-#[get("/list?<jid>")]
-async fn list(db: Db, user: EntitledUser, jid: i32) -> Result<Json<Vec<FileRecord>>> {
-    let records = db.run(move |conn| db_list(conn, user.id, jid)).await?;
+async fn list(
+    user: EntitledUser,
+    State(state): State<MetadataState>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<FileRecord>>> {
+    let records = state
+        .db
+        .run(move |conn| db_list(conn, user.id, query.jid))
+        .await?;
 
     Ok(Json(records))
 }
 
-#[get("/poll?<seconds>&<uuid>")]
 async fn poll(
     _user: EntitledUser,
-    clients: &State<Mutex<ActiveClients>>,
-    uuid: String,
-    seconds: u64,
-    shutdown: Shutdown,
+    State(state): State<MetadataState>,
+    Query(query): Query<PollQuery>,
 ) -> Result<()> {
-    let seconds = notification::clamp_poll_seconds(seconds);
+    let seconds = notification::clamp_poll_seconds(query.seconds);
 
-    let notification = clients.lock().unwrap().register(&uuid);
+    let notification = state.clients.lock().unwrap().register(&query.uuid);
 
     let timeout = tokio::time::timeout(Duration::from_secs(seconds), notification.notified());
 
     let result = tokio::select! {
-        _ = shutdown => Ok(()),
+        _ = state.shutdown.cancelled() => Ok(()),
         _ = timeout => Ok(()),
     };
 
-    clients.lock().unwrap().remove(&uuid);
+    state.clients.lock().unwrap().remove(&query.uuid);
 
     result
 }
 
-pub fn stage() -> AdHoc {
-    AdHoc::on_ignite("Diesel DB Stage", |rocket| async {
-        let clients = notification::init();
+pub async fn router(shutdown: CancellationToken) -> Router {
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
 
-        rocket
-            .attach(Db::fairing())
-            .attach(AdHoc::on_ignite(
-                "Diesel Migrations",
-                middleware::run_migrations,
-            ))
-            .mount("/metadata", routes![commit, has_files, list, poll])
-            .manage(clients)
-    })
+    let db = Db::new(&database_url);
+    middleware::run_migrations(&db).await;
+
+    let state = MetadataState {
+        db,
+        clients: Arc::new(notification::init()),
+        shutdown,
+    };
+
+    Router::new()
+        .route("/metadata/commit", post(commit))
+        .route("/metadata/has_files", get(has_files))
+        .route("/metadata/list", get(list))
+        .route("/metadata/poll", get(poll))
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(FORM_LIMIT))
+        .layer(CatchPanicLayer::new())
+        .layer(axum::middleware::map_response(
+            crate::error::default_error_pages,
+        ))
+        .with_state(state)
+}
+
+async fn method_not_allowed() -> StatusCode {
+    StatusCode::NOT_FOUND
 }

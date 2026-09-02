@@ -1,5 +1,3 @@
-use rocket::{Build, Rocket};
-
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 
 use super::db::Db;
@@ -10,17 +8,12 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("src/metadata/migration
 #[cfg(feature = "database_postgres")]
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("src/metadata/migrations/postgres");
 
-pub(crate) async fn run_migrations(rocket: Rocket<Build>) -> Rocket<Build> {
+pub(crate) async fn run_migrations(db: &Db) {
     use diesel_migrations::MigrationHarness;
 
-    Db::get_one(&rocket)
-        .await
-        .expect("database connection")
-        .run(|conn| {
-            conn.run_pending_migrations(MIGRATIONS)
-                .expect("diesel migrations");
-        })
-        .await;
-
-    rocket
+    db.run(|conn| {
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("diesel migrations");
+    })
+    .await;
 }

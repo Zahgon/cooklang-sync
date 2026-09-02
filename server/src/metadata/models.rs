@@ -1,12 +1,11 @@
 use diesel::prelude::*;
-use rocket::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::db::DieselBackend;
 use super::schema::file_records;
 
 #[derive(Queryable, Selectable, Identifiable, Deserialize, Serialize, Debug)]
 #[diesel(table_name = file_records)]
-#[serde(crate = "rocket::serde")]
 #[diesel(check_for_backend(DieselBackend))]
 pub struct FileRecord {
     pub id: i32,
@@ -18,7 +17,6 @@ pub struct FileRecord {
 
 #[derive(Insertable, Deserialize, Serialize, Debug)]
 #[diesel(table_name = file_records)]
-#[serde(crate = "rocket::serde")]
 #[diesel(check_for_backend(DieselBackend))]
 pub struct NewFileRecord {
     pub user_id: i32,

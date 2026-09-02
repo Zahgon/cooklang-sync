@@ -14,24 +14,32 @@ name = "server"
 
 
 [dependencies]
-rocket = { version = "0.5", features = ["json"] }
-rocket_sync_db_pools = { version = "0.1", optional = true }
+axum = "0.8"
 diesel = { version = "2", default-features = false, optional = true, features = ["r2d2"] }
 diesel_migrations = "2"
 libsqlite3-sys = { version = "0.35", optional = true, features = ["bundled"] }
 async-notify = "0.3"
-tokio = { version = "1.48", features = ["time"] }
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
 multer = "3"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower-http = { version = "0.6", features = ["catch-panic"] }
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 serde = { version = "1", features = ["derive"] }
-rocket-multipart = "0.2"
+serde_json = "1"
+serde_urlencoded = "0.7"
+futures = "0.3"
+async-stream = "0.3"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 mockall = "0.13"
+tokio = { version = "1.48", features = ["sync"] }
 tokio-test = "0.4"
 proptest = "1.9"
-rocket = { version = "0.5", features = ["json"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 default = ["database_sqlite"]
@@ -40,9 +48,7 @@ database_sqlite = [
   "diesel/sqlite",
   "diesel/returning_clauses_for_sqlite_3_35",
   "libsqlite3-sys/bundled",
-  "rocket_sync_db_pools/diesel_sqlite_pool"
 ]
 database_postgres = [
   "diesel/postgres",
-  "rocket_sync_db_pools/diesel_postgres_pool"
 ]

@@ -2,10 +2,8 @@ use std::borrow::Cow;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use rocket::request::FromParam;
-
 /// A _probably_ unique chunk ID.
-#[derive(UriDisplayPath, PartialEq, FromForm, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct ChunkId<'a>(pub(crate) Cow<'a, str>);
 
 impl ChunkId<'_> {
@@ -41,12 +39,14 @@ impl ChunkId<'_> {
     }
 }
 
-/// Returns an instance of `ChunkId` if the path segment is a valid ID.
-/// Otherwise returns the invalid ID as the `Err` value.
-impl<'a> FromParam<'a> for ChunkId<'a> {
-    type Error = &'a str;
-
-    fn from_param(param: &'a str) -> Result<Self, Self::Error> {
+impl<'a> ChunkId<'a> {
+    /// Returns an instance of `ChunkId` if the path segment is a valid ID.
+    /// Otherwise returns the invalid ID as the `Err` value.
+    ///
+    /// Replaces Rocket's `FromParam` impl; the caller (`chunks::retrieve`)
+    /// applies it to the captured path segment and turns an `Err` into the
+    /// same 422 Rocket produced when a param guard failed.
+    pub fn from_param(param: &'a str) -> Result<Self, &'a str> {
         param
             .chars()
             .all(|c| c.is_ascii_alphanumeric())

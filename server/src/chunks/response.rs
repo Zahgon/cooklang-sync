@@ -1,48 +1,62 @@
-use crate::chunk_id::ChunkId;
+use std::path::PathBuf;
 
-// todo try to avoid nesting?
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct MultiChunkResponse<'a> {
-    chunk_ids: Vec<ChunkId<'a>>,
+use async_stream::stream;
+use axum::body::{Body, Bytes};
+use axum::http::header::CONTENT_TYPE;
+use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
+use rand::distr::Alphanumeric;
+use rand::Rng;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
+
+/// Header block emitted before each section's bytes. Reproduces byte for byte
+/// what `rocket_multipart::MultipartStream` wrote, so `Remote::download_batch`
+/// in the client -- which scans for `--<boundary>` and an `X-Chunk-ID:` line
+/// itself rather than using a multipart parser -- keeps working unchanged.
+const SECTION_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+const BOUNDARY_LEN: usize = 15;
+
+/// A `multipart/mixed` response streaming one section per requested chunk.
+pub(crate) struct MultipartMixed {
+    boundary: String,
+    chunks: Vec<(String, PathBuf)>,
 }
 
-#[allow(dead_code)]
-impl MultiChunkResponse<'_> {
-    pub fn new(chunk_ids: Vec<ChunkId<'_>>) -> MultiChunkResponse<'_> {
-        MultiChunkResponse { chunk_ids }
+impl MultipartMixed {
+    pub(crate) fn new_random(chunks: Vec<(String, PathBuf)>) -> Self {
+        let boundary = rand::rng()
+            .sample_iter(Alphanumeric)
+            .map(char::from)
+            .take(BOUNDARY_LEN)
+            .collect();
+
+        Self { boundary, chunks }
     }
 }
 
-// impl<'r> Responder<'r, 'static> for MultiChunkResponse<'_> {
-//     fn respond_to(self, _: &'r Request<'_>) -> rocket::response::Result<'static> {
-//         let mut response = Response::build();
-//         response.header(ContentType::new("multipart", "mixed; boundary=AXX-BOUNDARY"));
+impl IntoResponse for MultipartMixed {
+    fn into_response(self) -> Response {
+        let MultipartMixed { boundary, chunks } = self;
+        let content_type = format!("multipart/mixed; boundary={boundary}");
 
-//     //     if id == EMPTY_CHUNK_ID {
-//     //     None
-//     // } else {
-//     //     File::open(id.file_path()).await.map(RawText).ok()
-//     // }
+        let body = Body::from_stream(stream! {
+            for (id, file_path) in chunks {
+                let file = File::open(file_path).await.expect("file present");
 
-//         let mut body = Vec::new();
-//         for chunk_id in self.chunk_ids {
-//             body.extend_from_slice(format!("--{}\r\n", "AXX-BOUNDARY").as_bytes());
-//             body.extend_from_slice(format!("Content-Type: {}\r\n", "application/octet-stream").as_bytes());
-//             body.extend_from_slice(format!("Content-Disposition: attachment; filename=\"{}\"\r\n", chunk_id.id()).as_bytes());
-//             body.extend_from_slice(b"\r\n");
+                yield Ok(Bytes::from(format!(
+                    "\r\n--{boundary}\r\nContent-Type: {SECTION_CONTENT_TYPE}\r\nX-Chunk-ID: {id}\r\n\r\n"
+                )));
 
-//             let mut file = File::open(chunk_id.file_path()).await.expect("shitteee");
-//             let mut contents = vec![];
-//             file.read_to_end(&mut contents).await.expect("shitteee");
+                let mut contents = ReaderStream::new(file);
+                while let Some(bytes) = contents.next().await {
+                    yield bytes;
+                }
+            }
 
-//             body.extend_from_slice(&contents);
+            yield Ok(Bytes::from(format!("\r\n--{boundary}--\r\n")));
+        });
 
-//             body.extend_from_slice(b"\r\n");
-//         }
-//         body.extend_from_slice(format!("--{}--\r\n", "AXX-BOUNDARY").as_bytes());
-
-//         response.sized_body(body.len(), Cursor::new(body));
-//         response.ok()
-//     }
-// }
+        ([(CONTENT_TYPE, content_type)], body).into_response()
+    }
+}
